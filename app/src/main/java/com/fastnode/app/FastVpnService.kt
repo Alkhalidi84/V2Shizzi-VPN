@@ -163,7 +163,9 @@ class FastVpnService : VpnService() {
             AppState.vpn = false
             AppState.sharing = false
             AppState.notifyChange()
-            if (stopping.get()) finishService()
+            // A failed start must not leave an empty foreground VPN service alive.
+            stopping.set(true)
+            finishService()
         }
     }
 
