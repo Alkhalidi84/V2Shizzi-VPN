@@ -17,6 +17,8 @@ object HotspotSharing {
     private var aps: List<String> = emptyList()
     private var tun = ""
     private var ownsShizukuForwarding = false
+    private var activeMode = ""
+    private var activeRequester = false
     private data class DetectionCache(val mode: String, val preference: String, val names: List<String>, val at: Long)
     @Volatile private var detectionCache: DetectionCache? = null
     var mode = ""
@@ -67,8 +69,11 @@ object HotspotSharing {
     }
 
     fun apIfaces(pref: String, mode: String = ""): List<String> {
-        if (pref.isNotBlank()) return pref.split(',', ' ').map(String::trim)
-            .filter { it.isNotEmpty() && IFACE_NAME.matches(it) }.distinct()
+        if (pref.isNotBlank()) {
+            val requested = pref.split(',', ' ').map(String::trim)
+                .filter { it.isNotEmpty() && IFACE_NAME.matches(it) }.distinct()
+            return requested
+        }
         val found = linkedSetOf<String>()
         val activeTun = tunIface()
         try {
@@ -135,12 +140,9 @@ object HotspotSharing {
             System.currentTimeMillis() - snapshot.at in 0..8_000) snapshot.names else apIfaces(p.iface, m)
         if (a.isEmpty()) return "ما قدرت أتعرف على واجهة الهوتسبوت. شغّل نقطة الاتصال واترك خانة الواجهة فارغة ثم أعد المحاولة."
 
-        // Remove this app's previous rules/request first; never disable Android's own forwarding request.
-        cleanup(m, a, t)
-        if (m == "shizuku") {
-            // A previous process may have exited before releasing its uniquely named netd request.
-            Shell.run(m, "ndc ipfwd disable $FORWARD_REQUESTER 2>/dev/null")
-        }
+        // Remove only rules previously owned by this app. Never disable Android's
+        // own forwarding state or a request whose ownership was not established.
+        if (mode.isNotEmpty()) disable()
 
         val steps = mutableListOf<Pair<String, Boolean>>() // command, critical
         steps += "echo 0 > /proc/sys/net/ipv4/conf/$t/rp_filter" to false
@@ -176,6 +178,7 @@ object HotspotSharing {
                 val (ndcCode, ndcOutput) = Shell.run(m, "ndc ipfwd enable $FORWARD_REQUESTER")
                 if (forwardingValue(m) == "1") {
                     ownsShizukuForwarding = true
+                    activeRequester = true
                 } else {
                     cleanup(m, a, t)
                     val detail = ndcOutput.ifBlank { "رمز خروج الأمر: $ndcCode" }.take(180)
@@ -187,14 +190,20 @@ object HotspotSharing {
         aps = a
         tun = t
         mode = m
+        activeMode = m
         return null
     }
 
     @Synchronized
     fun disable() {
-        if (mode.isEmpty()) return
-        cleanup(mode, aps, tun)
-        mode = ""; aps = emptyList(); tun = ""
+        val cleanupMode = mode.ifEmpty { activeMode }
+        if (cleanupMode.isEmpty()) return
+        cleanup(cleanupMode, aps, tun)
+        mode = ""
+        activeMode = ""
+        aps = emptyList()
+        tun = ""
+        detectionCache = null
     }
 
     private fun cleanup(m: String, a: List<String>, t: String) {
@@ -208,9 +217,10 @@ object HotspotSharing {
             cmds += "iptables -w -t nat -D PREROUTING -i $ap -p udp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null"
             cmds += "iptables -w -t nat -D PREROUTING -i $ap -p tcp --dport 53 -j DNAT --to-destination 1.1.1.1:53 2>/dev/null"
         }
-        if (m == "shizuku" && ownsShizukuForwarding) {
+        if (m == "shizuku" && ownsShizukuForwarding && activeRequester) {
             cmds += "ndc ipfwd disable $FORWARD_REQUESTER 2>/dev/null"
             ownsShizukuForwarding = false
+            activeRequester = false
         }
         Shell.run(m, cmds.joinToString("; "))
     }
