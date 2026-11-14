@@ -1,5 +1,31 @@
 package com.fastnode.app
 
+/**
+ * Common validation for imported proxy links. Parsing should reject malformed
+ * endpoints early instead of generating a config that fails much later in Xray.
+ */
+internal object ProxyLinkValidation {
+    fun requireEndpoint(host: String, port: Int) {
+        require(host.isNotBlank()) { "عنوان الخادم فارغ" }
+        require(host.none { it.isWhitespace() }) { "عنوان الخادم غير صالح" }
+        require(port in 1..65535) { "منفذ الخادم يجب أن يكون بين 1 و65535" }
+    }
+
+    fun requireTransport(network: String) {
+        require(network in setOf("tcp", "ws", "grpc", "httpupgrade", "xhttp", "splithttp", "http", "h2")) {
+            "نوع النقل غير مدعوم: $network"
+        }
+    }
+
+    fun requireSecurity(security: String) {
+        require(security in setOf("none", "tls", "reality")) {
+            "نوع التشفير غير مدعوم: $security"
+        }
+    }
+}
+
+package com.fastnode.app
+
 import android.net.Uri
 import android.util.Base64
 import org.json.JSONArray
@@ -11,15 +37,19 @@ data class Server(val name: String, val host: String, val port: Int, val outboun
 object LinkParser {
 
     fun parse(raw: String): Server? = try {
-        val s = raw.trim()
-        when {
-            s.startsWith("vless://") -> vless(s)
-            s.startsWith("vmess://") -> vmess(s)
-            s.startsWith("trojan://") -> trojan(s)
-            s.startsWith("ss://") -> shadowsocks(s)
+        val value = raw.trim()
+        require(value.isNotEmpty()) { "رابط الخادم فارغ" }
+        val parsed = when {
+            value.startsWith("vless://", ignoreCase = true) -> vless(value)
+            value.startsWith("vmess://", ignoreCase = true) -> vmess(value)
+            value.startsWith("trojan://", ignoreCase = true) -> trojan(value)
+            value.startsWith("ss://", ignoreCase = true) -> shadowsocks(value)
             else -> null
         }
-    } catch (e: Exception) { null }
+        parsed?.also { ProxyLinkValidation.requireEndpoint(it.host, it.port) }
+    } catch (_: Exception) {
+        null
+    }
 
     private fun b64(s: String): String {
         var t = s.replace('-', '+').replace('_', '/').trim()
@@ -28,8 +58,10 @@ object LinkParser {
     }
 
     private fun stream(q: (String) -> String?, host: String): JSONObject {
-        var net = q("type") ?: "tcp"
-        val sec = q("security") ?: "none"
+        var net = (q("type") ?: "tcp").lowercase()
+        val sec = (q("security") ?: "none").lowercase()
+        ProxyLinkValidation.requireTransport(net)
+        ProxyLinkValidation.requireSecurity(sec)
         val hostHdr = q("host")
         val path = q("path")
         val st = JSONObject()
@@ -89,9 +121,10 @@ object LinkParser {
     private fun vless(s: String): Server {
         val u = Uri.parse(s)
         val q = { k: String -> u.getQueryParameter(k)?.takeIf { it.isNotEmpty() } }
-        val host = u.host!!
+        val host = requireNotNull(u.host) { "عنوان VLESS غير صالح" }
         val port = if (u.port > 0) u.port else 443
-        val user = JSONObject().put("id", u.userInfo).put("encryption", q("encryption") ?: "none")
+        val userId = u.userInfo?.takeIf { it.isNotBlank() } ?: error("معرّف VLESS مفقود")
+        val user = JSONObject().put("id", userId).put("encryption", q("encryption") ?: "none")
         q("flow")?.let { user.put("flow", it) }
         val settings = JSONObject().put("vnext", JSONArray().put(
             JSONObject().put("address", host).put("port", port).put("users", JSONArray().put(user))))
@@ -112,9 +145,10 @@ object LinkParser {
             "serviceName" to j.optString("path")
         )
         val q = { k: String -> map[k]?.takeIf { it.isNotEmpty() } }
-        val host = j.getString("add")
+        val host = j.optString("add").takeIf { it.isNotBlank() } ?: error("عنوان VMess مفقود")
         val port = j.optString("port", "443").toInt()
-        val user = JSONObject().put("id", j.getString("id"))
+        val userId = j.optString("id").takeIf { it.isNotBlank() } ?: error("معرّف VMess مفقود")
+        val user = JSONObject().put("id", userId)
             .put("alterId", j.optString("aid", "0").toIntOrNull() ?: 0)
             .put("security", j.optString("scy", "auto").ifEmpty { "auto" })
         val settings = JSONObject().put("vnext", JSONArray().put(
@@ -126,10 +160,11 @@ object LinkParser {
         val u = Uri.parse(s)
         val q = { k: String -> u.getQueryParameter(k)?.takeIf { it.isNotEmpty() } }
         val q2 = { k: String -> if (k == "security") (q(k) ?: "tls") else q(k) }
-        val host = u.host!!
+        val host = requireNotNull(u.host) { "عنوان Trojan غير صالح" }
         val port = if (u.port > 0) u.port else 443
+        val password = u.userInfo?.takeIf { it.isNotBlank() } ?: error("كلمة مرور Trojan مفقودة")
         val settings = JSONObject().put("servers", JSONArray().put(
-            JSONObject().put("address", host).put("port", port).put("password", u.userInfo)))
+            JSONObject().put("address", host).put("port", port).put("password", password)))
         return Server(u.fragment ?: host, host, port, outbound("trojan", settings, stream(q2, host)))
     }
 
@@ -148,8 +183,11 @@ object LinkParser {
             userInfo = d.substringBeforeLast('@')
             hostPort = d.substringAfterLast('@')
         }
-        val method = userInfo.substringBefore(':')
-        val pass = userInfo.substringAfter(':')
+        val method = userInfo.substringBefore(':').takeIf { it.isNotBlank() }
+            ?: error("طريقة تشفير Shadowsocks مفقودة")
+        val pass = userInfo.substringAfter(':', "").takeIf { it.isNotBlank() }
+            ?: error("كلمة مرور Shadowsocks مفقودة")
+        require('@' in (if ('@' in main) main else b64(main))) { "عنوان Shadowsocks غير صالح" }
         val host = hostPort.substringBeforeLast(':').trim('[', ']')
         val port = hostPort.substringAfterLast(':').toInt()
         val settings = JSONObject().put("servers", JSONArray().put(
