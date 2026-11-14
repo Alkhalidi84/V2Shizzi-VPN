@@ -24,7 +24,6 @@ internal object ProxyLinkValidation {
     }
 }
 
-package com.fastnode.app
 
 import android.net.Uri
 import android.util.Base64
@@ -169,7 +168,7 @@ object LinkParser {
     }
 
     private fun shadowsocks(s: String): Server {
-        val rest = s.removePrefix("ss://")
+        val rest = s.removePrefix("ss://").removePrefix("SS://")
         val name = if ('#' in rest) URLDecoder.decode(rest.substringAfter('#'), "UTF-8") else ""
         val main = rest.substringBefore('#').substringBefore('?').trimEnd('/')
         val userInfo: String
@@ -187,9 +186,9 @@ object LinkParser {
             ?: error("طريقة تشفير Shadowsocks مفقودة")
         val pass = userInfo.substringAfter(':', "").takeIf { it.isNotBlank() }
             ?: error("كلمة مرور Shadowsocks مفقودة")
-        require('@' in (if ('@' in main) main else b64(main))) { "عنوان Shadowsocks غير صالح" }
         val host = hostPort.substringBeforeLast(':').trim('[', ']')
         val port = hostPort.substringAfterLast(':').toInt()
+        ProxyLinkValidation.requireEndpoint(host, port)
         val settings = JSONObject().put("servers", JSONArray().put(
             JSONObject().put("address", host).put("port", port).put("method", method).put("password", pass)))
         val st = JSONObject().put("network", "tcp").put("security", "none")
