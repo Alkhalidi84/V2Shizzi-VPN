@@ -179,9 +179,11 @@ object LinkParser {
             userInfo = if (':' in ui) URLDecoder.decode(ui, "UTF-8") else b64(ui)
             hostPort = main.substringAfterLast('@')
         } else {
-            val d = b64(main)
-            userInfo = d.substringBeforeLast('@')
-            hostPort = d.substringAfterLast('@')
+            // SIP002 may encode only method:password before @, or the complete payload.
+            val decoded = b64(main)
+            require('@' in decoded) { "تنسيق Shadowsocks غير صالح" }
+            userInfo = decoded.substringBeforeLast('@')
+            hostPort = decoded.substringAfterLast('@')
         }
         val method = userInfo.substringBefore(':').takeIf { it.isNotBlank() }
             ?: error("طريقة تشفير Shadowsocks مفقودة")
