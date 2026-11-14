@@ -1,11 +1,22 @@
-name: Build APK
+name: Build V2Shizzi VPN
+
 on:
   push:
+    branches: [main, "feature/**"]
+  pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2shizzi-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     env:
       V2SHIZZI_KEYSTORE_BASE64: ${{ secrets.V2SHIZZI_KEYSTORE_BASE64 }}
       V2SHIZZI_KEYSTORE_PASSWORD: ${{ secrets.V2SHIZZI_KEYSTORE_PASSWORD }}
@@ -17,56 +28,64 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: "17"
 
       - uses: android-actions/setup-android@v4
-        with:
-          log-accepted-android-sdk-licenses: false
 
-      - name: Install SDK / NDK
+      - name: Install Android SDK / NDK
         run: |
-          yes | sdkmanager --licenses >/dev/null || true
+          yes | sdkmanager --licenses >/dev/null
           sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
 
-      - name: Download Xray core (libv2ray)
+      - name: Download pinned Xray library
         run: |
+          set -euo pipefail
           mkdir -p app/libs
-          curl -fL -o app/libs/libv2ray.aar \
+          curl --fail --location --retry 3 --retry-all-errors \
+            -o app/libs/libv2ray.aar \
             https://github.com/2dust/AndroidLibXrayLite/releases/download/v26.7.28/libv2ray.aar
-          echo "cd4f58fde25dd4785d291bf9d368f88881f2abb0a02e199045a1b972bc40faad  app/libs/libv2ray.aar" | sha256sum -c -
+          echo "cd4f58fde25dd4785d291bf9d368f88881f2abb0a02e199045a1b972bc40faad  app/libs/libv2ray.aar" | sha256sum --check
 
-      - name: Build hev-socks5-tunnel (TUN to SOCKS)
+      - name: Build pinned HEV TUN-to-SOCKS library
         run: |
+          set -euo pipefail
           git init hev
           git -C hev remote add origin https://github.com/heiher/hev-socks5-tunnel.git
           git -C hev fetch --depth 1 origin 21bb3d77e64ad5a413d4d851b9f4cacf2098cd77
           git -C hev checkout --detach FETCH_HEAD
           git -C hev submodule update --init --recursive --depth 1
-          export NDK=$ANDROID_HOME/ndk/26.1.10909125
+          export NDK="$ANDROID_HOME/ndk/26.1.10909125"
           cd hev
-          $NDK/ndk-build NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
+          "$NDK/ndk-build" NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk \
             "APP_ABI=arm64-v8a armeabi-v7a x86_64" APP_PLATFORM=android-29 \
-            NDK_LIBS_OUT=$GITHUB_WORKSPACE/app/src/main/jniLibs NDK_OUT=/tmp/ndkout
-          ls -R $GITHUB_WORKSPACE/app/src/main/jniLibs
+            NDK_LIBS_OUT="$GITHUB_WORKSPACE/app/src/main/jniLibs" NDK_OUT=/tmp/ndkout
+          test -f "$GITHUB_WORKSPACE/app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so"
 
       - uses: gradle/actions/setup-gradle@v3
         with:
           gradle-version: 8.7
 
-      - name: Build privately signed release
-        if: ${{ env.V2SHIZZI_KEYSTORE_BASE64 != '' }}
-        run: |
-          echo "$V2SHIZZI_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/v2shizzi-release.jks"
-          export V2SHIZZI_KEYSTORE="$RUNNER_TEMP/v2shizzi-release.jks"
-          gradle assembleRelease --no-daemon
-
-      - name: Build debug APK for testing (no release key configured)
+      - name: Build debug APK
         if: ${{ env.V2SHIZZI_KEYSTORE_BASE64 == '' }}
         run: gradle assembleDebug --no-daemon
 
-      - uses: actions/upload-artifact@v4
+      - name: Build privately signed Release APKs
+        if: ${{ env.V2SHIZZI_KEYSTORE_BASE64 != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "$V2SHIZZI_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/v2shizzi-release.jks"
+          export V2SHIZZI_KEYSTORE="$RUNNER_TEMP/v2shizzi-release.jks"
+          export V2SHIZZI_KEYSTORE_PASSWORD="$V2SHIZZI_KEYSTORE_PASSWORD"
+          export V2SHIZZI_KEY_ALIAS="$V2SHIZZI_KEY_ALIAS"
+          export V2SHIZZI_KEY_PASSWORD="$V2SHIZZI_KEY_PASSWORD"
+          gradle assembleRelease --no-daemon
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          name: V2Shizzi-VPN-APK
+          name: V2Shizzi-VPN-${{ github.sha }}
+          if-no-files-found: error
           path: |
-            app/build/outputs/apk/release/*.apk
             app/build/outputs/apk/debug/*.apk
+            app/build/outputs/apk/release/*.apk

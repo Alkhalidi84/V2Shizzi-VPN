@@ -16,6 +16,8 @@ import android.view.View
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : Activity() {
     private lateinit var prefs: Prefs
@@ -25,25 +27,37 @@ class MainActivity : Activity() {
     private lateinit var b2: android.widget.Button
     private lateinit var status: TextView
     private lateinit var sessionInfo: TextView
-    private val listener: () -> Unit = { refresh() }
+
+    private val listener: () -> Unit = {
+        // The service publishes every completed start/stop attempt through AppState.
+        vpnRequestPending.set(false)
+        refresh()
+    }
     private val statsHandler = Handler(Looper.getMainLooper())
+    private val sharingWorker = Executors.newSingleThreadExecutor()
+    private val vpnRequestPending = AtomicBoolean(false)
+    private val sharingRequestPending = AtomicBoolean(false)
+    @Volatile private var isResumed = false
+
     private val statsTicker = object : Runnable {
         override fun run() {
             updateSessionInfo()
             statsHandler.postDelayed(this, 1_000L)
         }
     }
-    @Volatile private var isResumed = false
 
-    override fun onCreate(s: Bundle?) {
-        super.onCreate(s)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
         prefs = Prefs(this)
         window.statusBarColor = BG
         window.navigationBarColor = BG
         window.decorView.layoutDirection = View.LAYOUT_DIRECTION_RTL
+
         if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 5)
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATIONS)
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -80,7 +94,8 @@ class MainActivity : Activity() {
         root.addView(sessionInfo, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
 
         status = label("", 12f, Color.parseColor("#4A4458"), true).apply {
-            gravity = Gravity.CENTER; layoutDirection = View.LAYOUT_DIRECTION_LTR
+            gravity = Gravity.CENTER
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
             letterSpacing = 0.12f
         }
         root.addView(status, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(20) })
@@ -94,6 +109,7 @@ class MainActivity : Activity() {
         refresh()
         statsHandler.removeCallbacks(statsTicker)
         statsHandler.post(statsTicker)
+
         UpdateChecker.maybeCheck(this) { update ->
             runOnUiThread {
                 if (isResumed && !isFinishing && !isDestroyed) {
@@ -117,18 +133,32 @@ class MainActivity : Activity() {
         statsHandler.removeCallbacks(statsTicker)
     }
 
+    override fun onDestroy() {
+        statsHandler.removeCallbacksAndMessages(null)
+        sharingWorker.shutdown()
+        super.onDestroy()
+    }
+
     private fun refresh() {
-        val srv = LinkParser.parse(prefs.active)
-        chip.text = srv?.name ?: "لا يوجد كود"
+        val server = LinkParser.parse(prefs.active)
+        chip.text = server?.name ?: "لا يوجد كود"
         b1.text = if (AppState.vpn) "إيقاف VPN" else "تشغيل VPN"
-        b2.text = if (AppState.sharing) "إيقاف مشاركة الشبكة" else "مشاركة الشبكة"
+        b1.isEnabled = !vpnRequestPending.get()
+        b2.text = when {
+            sharingRequestPending.get() -> "جارٍ تنفيذ طلب المشاركة…"
+            AppState.sharing -> "إيقاف مشاركة الشبكة"
+            else -> "مشاركة الشبكة"
+        }
+        b2.isEnabled = !sharingRequestPending.get() && AppState.vpn
         logo.active = AppState.vpn
-        val st = when {
+        val currentStatus = when {
+            sharingRequestPending.get() -> "SHARING REQUEST"
             AppState.sharing -> "SHARING ACTIVE"
+            vpnRequestPending.get() -> "VPN REQUEST"
             AppState.vpn -> "VPN ACTIVE"
             else -> "DISCONNECTED"
         }
-        status.text = "V1.2.1  |  STATUS $st"
+        status.text = "V2SHIZZI  |  STATUS $currentStatus"
         updateSessionInfo()
     }
 
@@ -139,102 +169,159 @@ class MainActivity : Activity() {
         sessionInfo.visibility = if (summary.isEmpty()) View.GONE else View.VISIBLE
     }
 
-    private fun toast(m: String) = runOnUiThread { Toast.makeText(this, m, Toast.LENGTH_LONG).show() }
+    private fun toast(message: String) {
+        runOnUiThread {
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        }
+    }
 
     private fun onVpnClick() {
+        if (!vpnRequestPending.compareAndSet(false, true)) return
+
         if (AppState.vpn) {
             EventLog.add(this, "VPN", "طلب المستخدم إيقاف VPN")
-            startService(Intent(this, FastVpnService::class.java).setAction("stop"))
+            startService(Intent(this, FastVpnService::class.java).setAction(FastVpnService.ACTION_STOP))
+            vpnRequestPending.set(false)
+            refresh()
             return
         }
+
         if (LinkParser.parse(prefs.active) == null) {
-            EventLog.add(this, "اتصال الكود", "تعذر البدء: لا يوجد كود صالح مختار")
-            toast("أضف كود V2Ray من الإعدادات أولاً")
+            vpnRequestPending.set(false)
+            EventLog.add(this, "VPN", "تعذر البدء: لا يوجد كود صالح مختار")
+            toast("أضف كود V2Ray صالحاً من الإعدادات أولاً")
             startActivity(Intent(this, SettingsActivity::class.java))
+            refresh()
             return
         }
-        val i = VpnService.prepare(this)
-        if (i != null) startActivityForResult(i, 1) else startVpn()
+
+        try {
+            val permissionIntent = VpnService.prepare(this)
+            if (permissionIntent != null) {
+                startActivityForResult(permissionIntent, REQUEST_VPN_PERMISSION)
+            } else {
+                startVpn()
+            }
+        } catch (error: Throwable) {
+            vpnRequestPending.set(false)
+            EventLog.add(this, "VPN", "فشل طلب إذن VPN: ${error.message ?: error.javaClass.simpleName}")
+            toast("تعذر طلب إذن VPN")
+            refresh()
+        }
     }
 
     private fun startVpn() {
-        EventLog.add(this, "VPN", "إرسال طلب تشغيل خدمة VPN")
-        startForegroundService(Intent(this, FastVpnService::class.java).setAction("start"))
+        try {
+            EventLog.add(this, "VPN", "إرسال طلب تشغيل خدمة VPN")
+            val intent = Intent(this, FastVpnService::class.java).setAction(FastVpnService.ACTION_START)
+            startForegroundService(intent)
+        } catch (error: Throwable) {
+            vpnRequestPending.set(false)
+            EventLog.add(this, "VPN", "فشل تشغيل خدمة VPN: ${error.message ?: error.javaClass.simpleName}")
+            toast("تعذر تشغيل خدمة VPN: ${error.message ?: "خطأ غير معروف"}")
+            refresh()
+        }
     }
 
     @Deprecated("Deprecated in Java")
-    override fun onActivityResult(req: Int, res: Int, data: Intent?) {
-        super.onActivityResult(req, res, data)
-        if (req == 1 && res == RESULT_OK) startVpn()
-        else if (req == 1) EventLog.add(this, "VPN", "رفض المستخدم إذن VPN")
-        if (req == 2 && AppState.vpn && !AppState.sharing) {
-            checkHotspotAndShare(openSettingsIfOff = false)
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        when (requestCode) {
+            REQUEST_VPN_PERMISSION -> {
+                if (resultCode == RESULT_OK) {
+                    startVpn()
+                } else {
+                    vpnRequestPending.set(false)
+                    EventLog.add(this, "VPN", "رفض المستخدم إذن VPN")
+                    toast("لم يتم منح إذن VPN")
+                    refresh()
+                }
+            }
+            REQUEST_HOTSPOT_SETTINGS -> {
+                if (AppState.vpn && !AppState.sharing) checkHotspotAndShare(openSettingsIfOff = false)
+            }
         }
     }
 
     private fun onShareClick() {
-        if (AppState.sharing) {
-            EventLog.add(this, "مشاركة الإنترنت", "طلب المستخدم إيقاف المشاركة")
-            Thread {
-                try {
+        if (!AppState.vpn || !sharingRequestPending.compareAndSet(false, true)) return
+        refresh()
+        sharingWorker.execute {
+            try {
+                if (AppState.sharing) {
+                    EventLog.add(this, "مشاركة الإنترنت", "طلب المستخدم إيقاف المشاركة")
                     HotspotSharing.disable()
-                    EventLog.add(this@MainActivity, "مشاركة الإنترنت", "تم طلب تنظيف قواعد المشاركة وإيقافها")
-                } catch (e: Throwable) {
-                    EventLog.add(this@MainActivity, "خطأ إيقاف المشاركة", e.message ?: e.javaClass.simpleName)
-                } finally {
                     AppState.sharing = false
-                    AppState.notifyChange()
+                    EventLog.add(this, "مشاركة الإنترنت", "اكتمل طلب تنظيف قواعد المشاركة")
+                } else {
+                    EventLog.add(this, "مشاركة الإنترنت", "بدأ فحص واجهة الهوتسبوت والصلاحيات")
+                    val (mode, interfaces) = HotspotSharing.detectForSharing(applicationContext)
+                    if (mode == null) {
+                        throw IllegalStateException("فعّل Root أو شغّل Shizuku وامنح التطبيق صلاحية shell")
+                    }
+                    if (interfaces.isEmpty()) {
+                        runOnUiThread {
+                            if (isResumed) openHotspotSettings()
+                            else toast("شغّل نقطة الاتصال ثم أعد المحاولة")
+                        }
+                        return@execute
+                    }
+
+                    val error = HotspotSharing.enable(applicationContext)
+                    if (error != null) throw IllegalStateException(error)
+                    AppState.sharing = true
+                    EventLog.add(
+                        this, "مشاركة الإنترنت",
+                        "بدأت المشاركة عبر $mode؛ الواجهات=${interfaces.joinToString()}"
+                    )
                 }
-            }.start()
-            return
+            } catch (error: Throwable) {
+                EventLog.add(
+                    this, "خطأ مشاركة",
+                    error.message ?: error.javaClass.simpleName
+                )
+                AppState.sharing = false
+                toast("تعذّر تنفيذ مشاركة الشبكة: ${error.message ?: "خطأ غير معروف"}")
+            } finally {
+                sharingRequestPending.set(false)
+                AppState.notifyChange()
+                runOnUiThread { refresh() }
+            }
         }
-        if (!AppState.vpn) {
-            EventLog.add(this, "مشاركة الإنترنت", "فشل البدء: VPN غير نشط")
-            toast("شغّل VPN أولاً"); return
-        }
-        EventLog.add(this, "مشاركة الإنترنت", "بدأ فحص واجهة الهوتسبوت والصلاحيات")
-        checkHotspotAndShare(openSettingsIfOff = true)
     }
 
     private fun checkHotspotAndShare(openSettingsIfOff: Boolean) {
-        Thread {
+        if (!sharingRequestPending.compareAndSet(false, true)) return
+        refresh()
+        sharingWorker.execute {
             try {
-                val (mode, ifaces) = HotspotSharing.detectForSharing(applicationContext)
-                if (mode == null) {
-                    EventLog.add(this@MainActivity, "خطأ مشاركة", "لا يوجد منفذ أو صلاحية Root/Shizuku")
-                    toast("فعّل الروت أو شغّل Shizuku وامنح V2Shizzi VPN الصلاحية أولاً")
-                    return@Thread
-                }
-                if (ifaces.isEmpty()) {
-                    EventLog.add(this@MainActivity, "خطأ مشاركة", "لم تُكتشف واجهة هوتسبوت نشطة عبر $mode")
+                val (mode, interfaces) = HotspotSharing.detectForSharing(applicationContext)
+                if (mode == null) throw IllegalStateException("لا توجد صلاحية Root أو Shizuku")
+                if (interfaces.isEmpty()) {
                     runOnUiThread {
-                        if (openSettingsIfOff) openHotspotSettings()
-                        else toast("لم تُفعّل نقطة الوصول. شغّلها من الإعدادات ثم ارجع إلى V2Shizzi VPN.")
+                        if (openSettingsIfOff && isResumed) openHotspotSettings()
+                        else toast("لم يتم اكتشاف واجهة Hotspot نشطة")
                     }
-                    return@Thread
+                    return@execute
                 }
-                val err = HotspotSharing.enable(applicationContext)
-                if (err == null) {
-                    EventLog.add(this@MainActivity, "مشاركة الإنترنت", "نجاح تهيئة المشاركة عبر $mode؛ الواجهات=${ifaces.joinToString()}")
-                    AppState.sharing = true
-                    toast("تم تفعيل مشاركة نقطة الاتصال عبر " +
-                        (if (HotspotSharing.mode == "root") "الروت" else "Shizuku"))
-                } else {
-                    EventLog.add(this@MainActivity, "خطأ مشاركة", err)
-                    toast(err)
-                }
-                AppState.notifyChange()
-            } catch (e: Throwable) {
-                EventLog.add(this@MainActivity, "خطأ مشاركة غير متوقع", e.message ?: e.javaClass.simpleName)
-                toast("تعذّر تشغيل مشاركة الشبكة بأمان: ${e.message ?: "خطأ غير معروف"}")
+                val error = HotspotSharing.enable(applicationContext)
+                if (error != null) throw IllegalStateException(error)
+                AppState.sharing = true
+                EventLog.add(this, "مشاركة الإنترنت", "تم إعداد المشاركة عبر $mode")
+            } catch (error: Throwable) {
                 AppState.sharing = false
+                EventLog.add(this, "خطأ مشاركة", error.message ?: error.javaClass.simpleName)
+                toast("تعذّر تشغيل المشاركة: ${error.message ?: "خطأ غير معروف"}")
+            } finally {
+                sharingRequestPending.set(false)
                 AppState.notifyChange()
+                runOnUiThread { refresh() }
             }
-        }.start()
+        }
     }
 
     private fun openHotspotSettings() {
-        toast("افتح نقطة اتصال Wi‑Fi من شاشة النظام؛ سيعود التطبيق ويفحصها تلقائياً")
+        toast("فعّل نقطة اتصال Wi‑Fi من إعدادات النظام ثم ارجع إلى التطبيق")
         val actions = listOf(
             "android.settings.TETHER_SETTINGS",
             Settings.ACTION_WIRELESS_SETTINGS,
@@ -242,10 +329,18 @@ class MainActivity : Activity() {
         )
         for (action in actions) {
             try {
-                startActivityForResult(Intent(action), 2)
+                startActivityForResult(Intent(action), REQUEST_HOTSPOT_SETTINGS)
                 return
-            } catch (_: Exception) { }
+            } catch (_: Exception) {
+                // Try the next system settings entry point.
+            }
         }
         toast("تعذر فتح إعدادات الهوتسبوت تلقائياً")
+    }
+
+    companion object {
+        private const val REQUEST_NOTIFICATIONS = 5
+        private const val REQUEST_VPN_PERMISSION = 1
+        private const val REQUEST_HOTSPOT_SETTINGS = 2
     }
 }

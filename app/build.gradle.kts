@@ -3,23 +3,25 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val releaseKeystorePath = System.getenv("V2SHIZZI_KEYSTORE")
-val releaseStorePassword = System.getenv("V2SHIZZI_KEYSTORE_PASSWORD")
-val releaseKeyAlias = System.getenv("V2SHIZZI_KEY_ALIAS")
-val releaseKeyPassword = System.getenv("V2SHIZZI_KEY_PASSWORD")
-val hasPrivateReleaseKey = !releaseKeystorePath.isNullOrBlank() &&
-    !releaseStorePassword.isNullOrBlank() && !releaseKeyAlias.isNullOrBlank() && !releaseKeyPassword.isNullOrBlank()
+val releaseKeystorePath = providers.environmentVariable("V2SHIZZI_KEYSTORE").orNull
+val releaseStorePassword = providers.environmentVariable("V2SHIZZI_KEYSTORE_PASSWORD").orNull
+val releaseKeyAlias = providers.environmentVariable("V2SHIZZI_KEY_ALIAS").orNull
+val releaseKeyPassword = providers.environmentVariable("V2SHIZZI_KEY_PASSWORD").orNull
+val hasPrivateReleaseKey = listOf(
+    releaseKeystorePath, releaseStorePassword, releaseKeyAlias, releaseKeyPassword
+).all { !it.isNullOrBlank() }
 
 android {
     namespace = "com.fastnode.app"
     compileSdk = 34
 
     defaultConfig {
+        // Keep the existing application ID so installed users can update in place.
         applicationId = "com.fastnode.app"
         minSdk = 29
         targetSdk = 33
-        versionCode = 13
-        versionName = "1.2.1"
+        versionCode = 14
+        versionName = "1.3.0"
     }
 
     signingConfigs {
@@ -43,11 +45,20 @@ android {
     }
 
     buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            signingConfig = if (hasPrivateReleaseKey) signingConfigs.getByName("privateRelease") else signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            // Release builds must never silently fall back to the debug certificate.
+            if (hasPrivateReleaseKey) {
+                signingConfig = signingConfigs.getByName("privateRelease")
+            }
         }
     }
 
@@ -56,7 +67,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-
     packaging { jniLibs { useLegacyPackaging = true } }
 }
 

@@ -1,63 +1,64 @@
-# V2Shizzi VPN — V2Ray وVPN ومشاركة نقطة الاتصال
+# V2Shizzi VPN — Modernized Fork
 
-تطبيق Android أصلي باسم V2Shizzi VPN بـKotlin، الحد الأدنى المستهدف Android 10 (API 29). يدعم إدخال روابط VLESS وVMess وTrojan وShadowsocks، وتشغيلها عبر Xray داخل واجهة VPN في أندرويد، مع خيار تمرير حركة عملاء نقطة الاتصال إلى النفق باستخدام الروت أو Shizuku.
+Android VPN client with hotspot VPN sharing through Root or Shizuku.
 
-للتوافق مع روابط VLESS العامة التي تستخدم `security=none`، يستخدم هذا الإصدار Xray 26.7.28 بدلاً من المحرك الأحدث الذي يرفض هذه الإعدادات افتراضياً. هذا تنازل أمني مقصود: الاتصال غير مشفّر على مستوى TLS/REALITY، والمحرك أقدم وقد لا يحتوي آخر تحديثات الأمان. يطلب التطبيق تأكيد المستخدم قبل حفظ رابط VLESS غير المشفّر. استخدمه فقط لخادم تثق به، والأفضل طلب رابط TLS أو REALITY من المزود.
+## Architecture
 
-## الملفات والتبعيات
+- Android `VpnService` owns the TUN interface.
+- Xray (`libv2ray`) runs the supported proxy outbound.
+- HEV SOCKS5 tunnel bridges Android TUN traffic to the local Xray SOCKS inbound.
+- Hotspot forwarding is managed separately through Root or Shizuku shell operations.
+- Existing package identity is preserved: `com.fastnode.app`.
 
-يحتاج البناء إلى `libv2ray.aar` وإلى مكتبة `libhev-socks5-tunnel.so` لكل ABI. يوفّر مجلد `app/libs` و`app/src/main/jniLibs` التبعيات الموجودة في نسخة التسليم. يتضمن المشروع أيضاً Workflow مثبت الإصدارات لتنزيل Xray 26.7.28 وبناء مكتبة النفق عند البناء على GitHub Actions.
+## Supported link formats
 
-## البناء من Android Studio
+- VLESS
+- VMess
+- Trojan
+- Shadowsocks
 
-1. افتح مجلد `FastNode` في Android Studio حديث يدعم Gradle 8.7 وJDK 17.
-2. انتظر مزامنة Gradle. لبناء نسخة تطوير استخدم `gradle assembleDebug`. لبناء نسخة Release الرسمية، اتبع خطوات `RELEASE-SIGNING.md` ومرر ملف المفتاح وكلمات المرور عبر متغيرات البيئة؛ من دونها يوقّع Gradle بمفتاح debug ولا تعمل نسخة Release بسبب فحص الشهادة.
-3. لا تحذف ملفات `app/libs/libv2ray.aar` أو `app/src/main/jniLibs/*`؛ فهي مطلوبة للتشغيل.
+Transport availability depends on the bundled Xray core and the link parameters. A parsed link is not proof that its server or transport is reachable.
 
-لـGitHub Actions، أضف Secrets باسم `V2SHIZZI_KEYSTORE_BASE64` و`V2SHIZZI_KEYSTORE_PASSWORD` و`V2SHIZZI_KEY_ALIAS` و`V2SHIZZI_KEY_PASSWORD`. إذا لم تُضف أسرار التوقيع، ينشئ الـworkflow APK Debug للاختبار بدلاً من APK Release غير قابل للاستخدام.
+## Build requirements
 
-## الاستخدام
+- JDK 17
+- Android SDK Platform 34 and Build Tools 34.0.0
+- Android NDK 26.1.10909125
+- Gradle 8.7
+- Pinned Xray AAR and HEV native library (downloaded/built by CI).
 
-1. افتح **الإعدادات** والصق رابط السيرفر، ثم احفظه واختره من القائمة.
-2. اضغط تشغيل VPN واقبل نافذة إذن VPN التي يعرضها أندرويد.
-3. لمشاركة النفق: شغّل VPN واضغط **مشاركة الشبكة**. إذا كانت نقطة الاتصال مطفأة، يفتح التطبيق إعداداتها تلقائياً؛ فعّلها من النظام ثم ارجع إلى Fast Node ليعيد الفحص ويبدأ المشاركة. اختر الروت أو شغّل Shizuku وامنحه صلاحية shell.
-4. أوقف مشاركة الشبكة قبل إيقاف VPN، أو أوقف VPN وسيحاول التطبيق إزالة قواعده.
+Build a debug APK:
 
-## توافق مشاركة نقطة الاتصال
+```bash
+gradle assembleDebug
+```
 
-عند استخدام Shizuku، يجهز التطبيق قواعد المسار والجدار الناري أولاً، ثم يفحص `ip_forward`. إذا كانت forwarding مطفأة، يحاول طلبها من `netd` باستخدام requester مستقل خاص بالتطبيق، بدلاً من الكتابة المباشرة إلى sysctl المحمي. يحرر الطلب عند إيقاف المشاركة. إذا رفض النظام الطلب، تظهر رسالة توضح أن Shizuku لا يملك الصلاحية على هذا البناء.
+A signed Release build requires all of the following environment variables:
 
-لا يفعّل التطبيق نقطة الوصول بصمت؛ Android يحصر إدارة Tethered Soft AP في واجهات وصلاحيات نظام مميزة على كثير من الإصدارات والأجهزة. لذلك يفتح صفحة الإعدادات عند اكتشاف أنها متوقفة، ويطلب من المستخدم تشغيلها. أمر `cmd wifi start-softap` وحده غير مناسب لأنه يبدأ Soft AP لكنه لا يفعّل Internet tethering.
+- `V2SHIZZI_KEYSTORE` — path to the existing private keystore file
+- `V2SHIZZI_KEYSTORE_PASSWORD`
+- `V2SHIZZI_KEY_ALIAS`
+- `V2SHIZZI_KEY_PASSWORD`
 
-يبدأ الاكتشاف التلقائي من قائمة الواجهات النشطة التي يعلنها Android عبر `dumpsys tethering`، ثم يستخدم `dumpsys connectivity` وبيانات SoftAP من `dumpsys wifi` عند اختلاف إصدارات النظام أو الشركة المصنّعة. كمسار أخير، يفحص عناوين IPv4 المحلية و`ip addr` دون قائمة prefixes ثابتة لأسماء الواجهات. اترك الحقل فارغاً للكشف التلقائي، واستخدم زر **فحص واجهات الهوتسبوت تلقائياً** لعرض ما تم اكتشافه. قد تمنع بعض الأجهزة Shizuku من قراءة معلومات النظام أو عرض واجهة tether؛ عندها يلزم Root أو إدخال الواجهة يدوياً.
+Never commit the keystore, passwords, or update-provider credentials. Do not substitute a debug key for a public Release key: Android will not install it over a build signed with the original private certificate.
 
-يحتوي قسم **سجل الاتصال ومشاركة الإنترنت** في الإعدادات على آخر 100 حدث مع الاحتفاظ بحد أقصى 200 حدث على الجهاز، ويتضمن محاولات اتصال الأكواد ونجاح/فشل VPN وأخطاء مشاركة الإنترنت ونتائج فحص الواجهات. السجل محلي ويمكن مسحه من الشاشة، وتُنقّح روابط البروتوكولات وحقول كلمات المرور والتوكنات قبل الحفظ.
+## VPN sharing
 
-توجيه الهوتسبوت عبر VPN يعتمد على صلاحيات النظام، واسم واجهة الشبكة، وقواعد الجدار الناري التي تسمح بها الشركة المصنّعة. لذلك لا يمكن ضمانه لكل جهاز، وShizuku لا يملك صلاحيات الروت الكاملة على كل الإصدارات. أدخل اسم الواجهة فقط إذا لم يكتشفها التطبيق تلقائياً. لا تشارك أكواد السيرفر علناً لأنها بيانات اتصال حساسة.
+1. Import and select a server.
+2. Start VPN and approve Android's VPN permission dialog.
+3. Enable Wi-Fi hotspot or USB tethering in Android system settings.
+4. Select Root or start Shizuku and grant shell permission.
+5. Start hotspot sharing.
 
-## التحقق
+Sharing depends on the device firmware, Android release, kernel firewall support and available privileges. Shizuku is not equivalent to root; some devices reject forwarding or firewall commands.
 
-يُبنى التطبيق على Android 10+، لكن اختبار تدفق VPN الفعلي، وتوافق كل صيغة/نقل V2Ray، وتوجيه عميل نقطة اتصال يتطلب جهازاً حقيقياً ورابط خادم صالحاً. كما أن اختبار مشاركة الهوتسبوت يحتاج روتاً أو Shizuku متوافقاً. نجاح بناء APK لا يعني أن خادمك صالح أو أن الشركة المصنّعة تسمح بتمرير الهوتسبوت.
+## Security notes
 
-## عداد الجلسة والإشعار
+- VLESS with `security=none` is not protected by TLS/REALITY. Prefer TLS or REALITY when supported by the server.
+- Keep the same private Release keystore for all updates.
+- The updater validates SHA-256 and restricts update downloads to the configured HTTPS update host.
+- Do not expose server links, UUIDs, passwords, private keys or Shizuku pairing credentials in public logs.
 
-يعرض مدة تشغيل VPN وحركة بيانات UID التطبيق المستلمة والمرسلة كتقدير، ويحدّث إشعار VPN كل خمس ثوانٍ. يحتوي الإشعار زري فتح التطبيق وإيقاف VPN. عدادات `TrafficStats` تخص حركة التطبيق وقد لا تمثل بدقة الحمولة الصافية أو كامل استهلاك الأجهزة المتصلة عبر الهوتسبوت؛ زر فتح التطبيق يتيح إعادة الاتصال بعد الإيقاف.
+## Validation status
 
-## حماية الإصدار 1.1.9
-
-يُفعّل Release تصغير R8 وإزالة الموارد غير المستخدمة وإخفاء أسماء ملفات المصدر. قبل بدء نفق VPN يتحقق التطبيق من بصمة شهادة توقيع Release ويرفض النسخ المعاد توقيعها بشهادة مختلفة. هذه إجراءات ردع وتقوية وليست حماية مطلقة؛ يمكن تجاوزها بتعديل APK، والحماية القوية من العميل المعدّل تتطلب تحققاً من خادم موثوق أو Play Integrity مع backend. يُوقّع الإصدار بمفتاح V2Shizzi خاص، لذا يجب حفظ نسخة احتياطية من المفتاح وكلمتي مروره وعدم نشرها. دليل إعادة البناء موجود في `RELEASE-SIGNING.md`، أما نسخة المصدر القابلة للتعديل فتُوزّع منفصلة ولا تحتوي المفتاح.
-
-## تحديث التطبيق
-
-يتحقق التطبيق من ملف `update.json` العام على Cloudflare R2 عند فتحه (بحد أقصى مرة كل 12 ساعة)، كما يمكن بدء الفحص يدوياً من الإعدادات. ينزّل APK المناسب لمعمارية الجهاز ويتحقق من SHA-256 قبل فتح مثبت Android. لا يدعم Android التثبيت الصامت؛ لذلك يتطلب التثبيت إذناً من المستخدم وتأكيد النظام. عنوان manifest هو `https://updates.mrsuohib.online/update.json`، وروابط APK يجب أن تكون على النطاق نفسه. لا تضع مفاتيح R2 داخل التطبيق أو ملفات المصدر.
-
-
-## نشر التحديثات عبر Cloudflare R2
-
-- Bucket: `v2shizzi-updates`.
-- النطاق العام: `updates.mrsuohib.online` ويجب أن تكون حالته Active والوصول العام مفعّلاً.
-- ينشر الـworkflow ملفات APK أولاً، ثم `update.json` أخيراً.
-- أضف Actions Secrets: `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`، بالإضافة إلى أسرار توقيع الإصدار الأربعة في `RELEASE-SIGNING.md`.
-- صلاحية الناشر المطلوبة: **Object Read & Write** على bucket `v2shizzi-updates` فقط، وليس Admin.
-- ارفع `versionCode` و`versionName` قبل كل إصدار، ثم أنشئ tag مطابقاً مثل `v1.2.2`.
-- GitHub Actions للبناء والنشر الآلي فقط؛ التطبيق يقرأ ملفات التحديث من Cloudflare R2 وليس GitHub Releases.
+CI builds a Debug APK and creates Release APKs only when signing secrets are supplied. Device-level validation is still required for VPN packet flow, proxy transports, hotspot forwarding, Shizuku compatibility and OEM-specific network behavior.
