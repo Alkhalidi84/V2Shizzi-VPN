@@ -28,7 +28,11 @@ class MainActivity : Activity() {
     private lateinit var status: TextView
     private lateinit var sessionInfo: TextView
 
-    private val listener: () -> Unit = { refresh() }
+    private val listener: () -> Unit = {
+        // The service publishes every completed start/stop attempt through AppState.
+        vpnRequestPending.set(false)
+        refresh()
+    }
     private val statsHandler = Handler(Looper.getMainLooper())
     private val sharingWorker = Executors.newSingleThreadExecutor()
     private val vpnRequestPending = AtomicBoolean(false)
