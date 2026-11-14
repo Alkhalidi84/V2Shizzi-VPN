@@ -1,5 +1,11 @@
 package com.fastnode.app
 
+import android.net.Uri
+import android.util.Base64
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.URLDecoder
+
 /**
  * Common validation for imported proxy links. Parsing should reject malformed
  * endpoints early instead of generating a config that fails much later in Xray.
@@ -25,11 +31,6 @@ internal object ProxyLinkValidation {
 }
 
 
-import android.net.Uri
-import android.util.Base64
-import org.json.JSONArray
-import org.json.JSONObject
-import java.net.URLDecoder
 
 data class Server(val name: String, val host: String, val port: Int, val outbound: JSONObject)
 
